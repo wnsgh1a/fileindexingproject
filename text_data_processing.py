@@ -1,181 +1,154 @@
-import re
 import os
 import time
 import nltk
-from nltk.tokenize import word_tokenize, sent_tokenize
-from nltk.corpus import stopwords
-from nltk.probability import FreqDist
-from nltk.stem import WordNetLemmatizer
-from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn
-from data_processing_common import sanitize_filename
+from datetime import datetime
 
-def summarize_text_content(text, text_inference):
-    """Summarize the given text content."""
-    prompt = f"""Provide a concise and accurate summary of the following text, focusing on the main ideas and key details.
-Limit your summary to a maximum of 150 words.
+from file_utils import (
+    display_directory_tree,
+    collect_file_paths,
+    separate_files_by_type,
+    read_file_data
+)
 
-Text: {text}
+from data_processing_common import (
+    compute_operations,
+    execute_operations,
+    process_files_by_date,
+    process_files_by_type,
+)
 
-Summary:"""
+from text_data_processing import process_text_files
+from image_data_processing import process_image_files
 
-    response = text_inference.create_completion(prompt)
-    summary = response['choices'][0]['text'].strip()
-    return summary
+from output_filter import filter_specific_output
+from nexa.gguf import NexaVLMInference, NexaTextInference
 
-def process_single_text_file(args, text_inference, silent=False, log_file=None):
-    """Process a single text file to generate metadata."""
-    file_path, text = args
-    start_time = time.time()
+def ensure_nltk_data():
+    nltk.download('stopwords', quiet=True)
+    nltk.download('punkt', quiet=True)
+    nltk.download('wordnet', quiet=True)
 
-    # Create a Progress instance for this file
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TimeElapsedColumn()
-    ) as progress:
-        task_id = progress.add_task(f"Processing {os.path.basename(file_path)}", total=1.0)
-        foldername, filename, description = generate_text_metadata(text, file_path, progress, task_id, text_inference)
+image_inference = None
+text_inference = None
 
-    end_time = time.time()
-    time_taken = end_time - start_time
+def initialize_models():
+    global image_inference, text_inference
+    if image_inference is None or text_inference is None:
+        model_path = "llava-v1.6-vicuna-7b:q4_0"
+        model_path_text = "Llama3.2-3B-Instruct:q3_K_M"
+        with filter_specific_output():
+            image_inference = NexaVLMInference(
+                model_path=model_path,
+                local_path=None,
+                stop_words=[],
+                temperature=0.3,
+                max_new_tokens=3000,
+                top_k=3,
+                top_p=0.2,
+                profiling=False
+            )
+            text_inference = NexaTextInference(
+                model_path=model_path_text,
+                local_path=None,
+                stop_words=[],
+                temperature=0.5,
+                max_new_tokens=3000,
+                top_k=3,
+                top_p=0.3,
+                profiling=False
+            )
+        print("**----------------------------------------------**")
+        print("**       Image inference model initialized      **")
+        print("**       Text inference model initialized       **")
+        print("**----------------------------------------------**")
 
-    message = f"File: {file_path}\nTime taken: {time_taken:.2f} seconds\nDescription: {description}\nFolder name: {foldername}\nGenerated filename: {filename}\n"
-    if silent:
-        if log_file:
-            with open(log_file, 'a') as f:
-                f.write(message + '\n')
-    else:
-        print(message)
-    return {
-        'file_path': file_path,
-        'foldername': foldername,
-        'filename': filename,
-        'description': description
-    }
+def simulate_directory_tree(operations, base_path):
+    tree = {}
+    for op in operations:
+        rel_path = os.path.relpath(op['destination'], base_path)
+        parts = rel_path.split(os.sep)
+        current_level = tree
+        for part in parts:
+            if part not in current_level:
+                current_level[part] = {}
+            current_level = current_level[part]
+    return tree
 
-def process_text_files(text_tuples, text_inference, silent=False, log_file=None):
-    """Process text files sequentially."""
-    results = []
-    for args in text_tuples:
-        data = process_single_text_file(args, text_inference, silent=silent, log_file=log_file)
-        results.append(data)
-    return results
+def print_simulated_tree(tree, prefix=''):
+    pointers = ['├── '] * (len(tree) - 1) + ['└── '] if tree else []
+    for pointer, key in zip(pointers, tree):
+        print(prefix + pointer + key)
+        if tree[key]:
+            extension = '│   ' if pointer == '├── ' else '    '
+            print_simulated_tree(tree[key], prefix + extension)
 
-def generate_text_metadata(input_text, file_path, progress, task_id, text_inference):
-    """Generate description, folder name, and filename for a text document."""
+def get_yes_no(prompt):
+    while True:
+        response = input(prompt).strip().lower()
+        if response in ('yes', 'y'):
+            return True
+        elif response in ('no', 'n'):
+            return False
+        elif response == '/exit':
+            print("Exiting program.")
+            exit()
+        else:
+            print("Please enter 'yes' or 'no'. To exit, type '/exit'.")
 
-    # Total steps in processing a text file
-    total_steps = 3
+def main():
+    ensure_nltk_data()
+    print("-" * 50)
+    print("**NOTE: Silent mode logs all outputs to a text file instead of displaying them in the terminal.")
+    silent_mode = get_yes_no("Silent mode? (yes/no): ")
+    log_file = 'operation_log.txt' if silent_mode else None
 
-    # Step 1: Generate description
-    description = summarize_text_content(input_text, text_inference)
-    progress.update(task_id, advance=1 / total_steps)
+    input_path = input("정리할 폴더 경로 입력: ").strip()
+    while not os.path.exists(input_path):
+        print(f"경로가 존재하지 않습니다: {input_path}")
+        input_path = input("다시 입력해주세요: ").strip()
 
-    # Step 2: Generate filename
-    filename_prompt =  f"""Based on the summary below, generate a specific and descriptive filename that captures the essence of the document.
-Limit the filename to a maximum of 3 words. Use nouns and avoid starting with verbs like 'depicts', 'shows', 'presents', etc.
-Do not include any data type words like 'text', 'document', 'pdf', etc. Use only letters and connect words with underscores.
+    output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
+    print(f"정리된 파일은 다음 위치에 저장됩니다: {output_path}")
 
-Summary: {description}
+    file_paths = collect_file_paths(input_path)
+    display_directory_tree(input_path)
 
-Examples:
-1. Summary: A research paper on the fundamentals of string theory.
-   Filename: fundamentals_of_string_theory
+    print("모델 초기화 중...")
+    initialize_models()
 
-2. Summary: An article discussing the effects of climate change on polar bears.
-   Filename: climate_change_polar_bears
+    image_files, text_files = separate_files_by_type(file_paths)
 
-Now generate the filename.
+    # 텍스트 파일 처리
+    text_tuples = []
+    for fp in text_files:
+        content = read_file_data(fp)
+        if content:
+            text_tuples.append((fp, content))
 
-Output only the filename, without any additional text.
+    data_images = process_image_files(image_files, image_inference, text_inference, silent=silent_mode, log_file=log_file)
+    data_texts = process_text_files(text_tuples, text_inference, silent=silent_mode, log_file=log_file)
 
-Filename:"""
-    filename_response = text_inference.create_completion(filename_prompt)
-    filename = filename_response['choices'][0]['text'].strip()
-    # Remove 'Filename:' prefix if present
-    filename = re.sub(r'^Filename:\s*', '', filename, flags=re.IGNORECASE).strip()
-    progress.update(task_id, advance=1 / total_steps)
+    all_data = data_images + data_texts
+    renamed_files = set()
+    processed_files = set()
 
-    # Step 3: Generate folder name from summary
-    foldername_prompt = f"""Based on the summary below, generate a general category or theme that best represents the main subject of this document.
-This will be used as the folder name. Limit the category to a maximum of 2 words. Use nouns and avoid verbs.
-Do not include specific details, words from the filename, or any generic terms like 'untitled' or 'unknown'.
+    operations = compute_operations(
+        all_data,
+        output_path,
+        renamed_files,
+        processed_files
+    )
 
-Summary: {description}
+    print("-" * 50)
+    print("생성될 폴더 구조 미리보기:")
+    simulated_tree = simulate_directory_tree(operations, output_path)
+    print_simulated_tree(simulated_tree)
+    print("-" * 50)
 
-Examples:
-1. Summary: A research paper on the fundamentals of string theory.
-   Category: physics
+    if get_yes_no("위와 같이 정리를 진행할까요? (yes/no): "):
+        os.makedirs(output_path, exist_ok=True)
+        execute_operations(operations, dry_run=False, silent=silent_mode, log_file=log_file)
+        print("정리 완료!")
 
-2. Summary: An article discussing the effects of climate change on polar bears.
-   Category: environment
-
-Now generate the category.
-
-Output only the category, without any additional text.
-
-Category:"""
-    foldername_response = text_inference.create_completion(foldername_prompt)
-    foldername = foldername_response['choices'][0]['text'].strip()
-    # Remove 'Category:' prefix if present
-    foldername = re.sub(r'^Category:\s*', '', foldername, flags=re.IGNORECASE).strip()
-    progress.update(task_id, advance=1 / total_steps)
-
-    # Remove unwanted words and stopwords
-    unwanted_words = set([
-        'the', 'and', 'based', 'generated', 'this', 'is', 'filename', 'file', 'document', 'text', 'output', 'only', 'below', 'category',
-        'summary', 'key', 'details', 'information', 'note', 'notes', 'main', 'ideas', 'concepts', 'in', 'on', 'of', 'with', 'by', 'for',
-        'to', 'from', 'a', 'an', 'as', 'at', 'i', 'we', 'you', 'they', 'he', 'she', 'it', 'that', 'which', 'are', 'were', 'was', 'be',
-        'have', 'has', 'had', 'do', 'does', 'did', 'but', 'if', 'or', 'because', 'about', 'into', 'through', 'during', 'before', 'after',
-        'above', 'below', 'any', 'each', 'few', 'more', 'most', 'other', 'some', 'such', 'no', 'nor', 'not', 'only', 'own', 'same', 'so',
-        'than', 'too', 'very', 's', 't', 'can', 'will', 'just', 'don', 'should', 'now', 'new', 'depicts', 'show', 'shows', 'display',
-        'illustrates', 'presents', 'features', 'provides', 'covers', 'includes', 'discusses', 'demonstrates', 'describes'
-    ])
-    stop_words = set(stopwords.words('english'))
-    all_unwanted_words = unwanted_words.union(stop_words)
-    lemmatizer = WordNetLemmatizer()
-
-    # Function to clean and process the AI output
-    def clean_ai_output(text, max_words):
-        # Remove special characters and numbers
-        text = re.sub(r'[^\w\s]', ' ', text)
-        text = re.sub(r'\d+', '', text)
-        text = text.strip()
-        # Split concatenated words (e.g., 'mathOperations' -> 'math Operations')
-        text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        # Tokenize and lemmatize words
-        words = word_tokenize(text)
-        words = [word.lower() for word in words if word.isalpha()]
-        words = [lemmatizer.lemmatize(word) for word in words]
-        # Remove unwanted words and duplicates
-        filtered_words = []
-        seen = set()
-        for word in words:
-            if word not in all_unwanted_words and word not in seen:
-                filtered_words.append(word)
-                seen.add(word)
-        # Limit to max words
-        filtered_words = filtered_words[:max_words]
-        return '_'.join(filtered_words)
-
-    # Process filename
-    filename = clean_ai_output(filename, max_words=3)
-    if not filename or filename.lower() in ('untitled', ''):
-        # Use keywords from the description
-        filename = clean_ai_output(description, max_words=3)
-    if not filename:
-        filename = 'document_' + os.path.splitext(os.path.basename(file_path))[0]
-
-    sanitized_filename = sanitize_filename(filename, max_words=3)
-
-    # Process foldername
-    foldername = clean_ai_output(foldername, max_words=2)
-    if not foldername or foldername.lower() in ('untitled', ''):
-        # Attempt to extract keywords from the description
-        foldername = clean_ai_output(description, max_words=2)
-        if not foldername:
-            foldername = 'documents'
-
-    sanitized_foldername = sanitize_filename(foldername, max_words=2)
-
-    return sanitized_foldername, sanitized_filename, description
+if __name__ == '__main__':
+    main()
