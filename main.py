@@ -1,19 +1,16 @@
 import os
 import time
 import shutil
-import re
 from datetime import datetime
 from file_utils import collect_file_paths, read_file_data, display_directory_tree
-from content_classifier import classify_by_filename, classify_by_content
+from content_classifier import classify_by_content, classify_filename_with_ai
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
-
 
 def ensure_nltk_data():
     import nltk
     nltk.download('punkt', quiet=True)
     nltk.download('stopwords', quiet=True)
-
 
 def get_yes_no(prompt):
     while True:
@@ -28,28 +25,27 @@ def get_yes_no(prompt):
         else:
             print("'yes' 또는 'no'로 대답해주세요. 종료하려면 '/exit' 입력.")
 
-
 def extract_year_month(file_path):
     timestamp = os.path.getctime(file_path)
     dt = datetime.fromtimestamp(timestamp)
     return dt.strftime("%Y-%m")
 
-
 def create_output_path(base_output_path, year_month, category):
+    # 폴더명에서 파일 시스템에 안 되는 문자 제거
+    category = str(category).replace("/", "_").replace("\\", "_").strip()
     folder = os.path.join(base_output_path, year_month, category)
     os.makedirs(folder, exist_ok=True)
     return folder
-
 
 def organize_files_by_name_and_content(file_paths, output_path, model, silent=False, log_file=None):
     for file_path in file_paths:
         file_name = os.path.basename(file_path)
         year_month = extract_year_month(file_path)
 
-        # 1차 시도: 파일명으로 분류
-        category = classify_by_filename(file_name)
+        # 1차 분류: 파일명 기반
+        category = classify_filename_with_ai(file_name, model)
 
-        # 2차 시도: 내용 기반 분류
+        # 2차 분류: 내용 기반
         if category == '기타':
             content = read_file_data(file_path)
             if content:
@@ -57,7 +53,6 @@ def organize_files_by_name_and_content(file_paths, output_path, model, silent=Fa
             else:
                 category = '기타'
 
-        # 이동
         target_folder = create_output_path(output_path, year_month, category)
         new_path = os.path.join(target_folder, file_name)
         shutil.copy2(file_path, new_path)
@@ -67,7 +62,6 @@ def organize_files_by_name_and_content(file_paths, output_path, model, silent=Fa
         elif log_file:
             with open(log_file, 'a', encoding='utf-8') as f:
                 f.write(f"{file_name} → {year_month}/{category}/\n")
-
 
 def initialize_model():
     model_path_text = "Llama3.2-3B-Instruct:q3_K_M"
@@ -84,7 +78,6 @@ def initialize_model():
         )
     print("텍스트 모델이 초기화되었습니다.")
     return model
-
 
 def main():
     ensure_nltk_data()
@@ -117,6 +110,7 @@ def main():
     print(f"정리된 경로: {output_path}")
     if not silent_mode:
         display_directory_tree(output_path)
+    print("AI 응답:", response)
 
 
 if __name__ == '__main__':
