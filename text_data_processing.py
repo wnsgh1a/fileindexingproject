@@ -1,154 +1,106 @@
+import re
 import os
 import time
 import nltk
-from datetime import datetime
+from nltk.tokenize import word_tokenize, sent_tokenize
+from nltk.corpus import stopwords
+from nltk.probability import FreqDist
+from nltk.stem import WordNetLemmatizer
+from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn
+from data_processing_common import sanitize_filename
+from transformers import MarianMTModel, MarianTokenizer
 
-from file_utils import (
-    display_directory_tree,
-    collect_file_paths,
-    separate_files_by_type,
-    read_file_data
-)
+# ✅ 한영 번역기 로딩 (Helsinki-NLP)
+model_name = 'Helsinki-NLP/opus-mt-ko-en'
+tokenizer = MarianTokenizer.from_pretrained(model_name)
+translator = MarianMTModel.from_pretrained(model_name)
 
-from data_processing_common import (
-    compute_operations,
-    execute_operations,
-    process_files_by_date,
-    process_files_by_type,
-)
+def translate_korean_to_english(text):
+    """Translate Korean to English using a pretrained MarianMT model."""
+    batch = tokenizer.prepare_seq2seq_batch([text], return_tensors="pt", padding=True)
+    gen = translator.generate(**batch)
+    translated = tokenizer.batch_decode(gen, skip_special_tokens=True)
+    return translated[0] if translated else text
 
-from text_data_processing import process_text_files
-from image_data_processing import process_image_files
+def summarize_text_content(text, text_inference):
+    """Summarize the given text content."""
+    prompt = f"""Provide a concise and accurate summary of the following text, focusing on the main ideas and key details.
+Limit your summary to a maximum of 150 words.
 
-from output_filter import filter_specific_output
-from nexa.gguf import NexaVLMInference, NexaTextInference
+Text: {text}
 
-def ensure_nltk_data():
-    nltk.download('stopwords', quiet=True)
-    nltk.download('punkt', quiet=True)
-    nltk.download('wordnet', quiet=True)
+Summary:"""
+    response = text_inference.create_completion(prompt)
+    return response['choices'][0]['text'].strip()
 
-image_inference = None
-text_inference = None
+def process_single_text_file(args, text_inference, silent=False, log_file=None):
+    file_path, text = args
+    start_time = time.time()
+    with Progress(
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TimeElapsedColumn()
+    ) as progress:
+        task_id = progress.add_task(f"Processing {os.path.basename(file_path)}", total=1.0)
+        foldername, filename, description = generate_text_metadata(text, file_path, progress, task_id, text_inference)
+    end_time = time.time()
+    message = f"File: {file_path}\nTime taken: {end_time - start_time:.2f} seconds\nDescription: {description}\nFolder name: {foldername}\nGenerated filename: {filename}\n"
+    if silent:
+        if log_file:
+            with open(log_file, 'a') as f:
+                f.write(message + '\n')
+    else:
+        print(message)
+    return {
+        'file_path': file_path,
+        'foldername': foldername,
+        'filename': filename,
+        'description': description
+    }
 
-def initialize_models():
-    global image_inference, text_inference
-    if image_inference is None or text_inference is None:
-        model_path = "llava-v1.6-vicuna-7b:q4_0"
-        model_path_text = "Llama3.2-3B-Instruct:q3_K_M"
-        with filter_specific_output():
-            image_inference = NexaVLMInference(
-                model_path=model_path,
-                local_path=None,
-                stop_words=[],
-                temperature=0.3,
-                max_new_tokens=3000,
-                top_k=3,
-                top_p=0.2,
-                profiling=False
-            )
-            text_inference = NexaTextInference(
-                model_path=model_path_text,
-                local_path=None,
-                stop_words=[],
-                temperature=0.5,
-                max_new_tokens=3000,
-                top_k=3,
-                top_p=0.3,
-                profiling=False
-            )
-        print("**----------------------------------------------**")
-        print("**       Image inference model initialized      **")
-        print("**       Text inference model initialized       **")
-        print("**----------------------------------------------**")
+def process_text_files(text_tuples, text_inference, silent=False, log_file=None):
+    results = []
+    for args in text_tuples:
+        data = process_single_text_file(args, text_inference, silent=silent, log_file=log_file)
+        results.append(data)
+    return results
 
-def simulate_directory_tree(operations, base_path):
-    tree = {}
-    for op in operations:
-        rel_path = os.path.relpath(op['destination'], base_path)
-        parts = rel_path.split(os.sep)
-        current_level = tree
-        for part in parts:
-            if part not in current_level:
-                current_level[part] = {}
-            current_level = current_level[part]
-    return tree
+def generate_text_metadata(text, file_path, progress, task_id, text_inference):
+    total_steps = 3
+    filename_ko = os.path.splitext(os.path.basename(file_path))[0]
+    filename_en = translate_korean_to_english(filename_ko)
+    lemmatizer = WordNetLemmatizer()
+    stop_words = set(stopwords.words('english'))
+    unwanted_words = set([...])  # 기존 unwanted 단어들 생략
+    all_unwanted = unwanted_words.union(stop_words)
 
-def print_simulated_tree(tree, prefix=''):
-    pointers = ['├── '] * (len(tree) - 1) + ['└── '] if tree else []
-    for pointer, key in zip(pointers, tree):
-        print(prefix + pointer + key)
-        if tree[key]:
-            extension = '│   ' if pointer == '├── ' else '    '
-            print_simulated_tree(tree[key], prefix + extension)
+    # Step 1: Summary
+    description = summarize_text_content(text, text_inference)
+    progress.update(task_id, advance=1 / total_steps)
 
-def get_yes_no(prompt):
-    while True:
-        response = input(prompt).strip().lower()
-        if response in ('yes', 'y'):
-            return True
-        elif response in ('no', 'n'):
-            return False
-        elif response == '/exit':
-            print("Exiting program.")
-            exit()
-        else:
-            print("Please enter 'yes' or 'no'. To exit, type '/exit'.")
+    # Step 2: Filename from translated filename
+    filename_prompt = f"""
+Based on the file name below, generate a descriptive but concise filename (max 3 words) using nouns only.
+Avoid words like file, doc, pdf, text.
+Filename: {filename_en}
+Output only the filename:
+"""
+    filename_response = text_inference.create_completion(filename_prompt)
+    raw_filename = filename_response['choices'][0]['text'].strip()
+    filename = sanitize_filename(raw_filename, max_words=3)
+    progress.update(task_id, advance=1 / total_steps)
 
-def main():
-    ensure_nltk_data()
-    print("-" * 50)
-    print("**NOTE: Silent mode logs all outputs to a text file instead of displaying them in the terminal.")
-    silent_mode = get_yes_no("Silent mode? (yes/no): ")
-    log_file = 'operation_log.txt' if silent_mode else None
+    # Step 3: Folder name
+    folder_prompt = f"""
+Based on the translated filename and document summary below, generate a general topic folder name (max 2 words).
+Use nouns only. No generic words like 'document', 'untitled'.
+Translated Filename: {filename_en}
+Summary: {description}
+Category:
+"""
+    folder_response = text_inference.create_completion(folder_prompt)
+    raw_folder = folder_response['choices'][0]['text'].strip()
+    foldername = sanitize_filename(raw_folder, max_words=2)
+    progress.update(task_id, advance=1 / total_steps)
 
-    input_path = input("정리할 폴더 경로 입력: ").strip()
-    while not os.path.exists(input_path):
-        print(f"경로가 존재하지 않습니다: {input_path}")
-        input_path = input("다시 입력해주세요: ").strip()
-
-    output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
-    print(f"정리된 파일은 다음 위치에 저장됩니다: {output_path}")
-
-    file_paths = collect_file_paths(input_path)
-    display_directory_tree(input_path)
-
-    print("모델 초기화 중...")
-    initialize_models()
-
-    image_files, text_files = separate_files_by_type(file_paths)
-
-    # 텍스트 파일 처리
-    text_tuples = []
-    for fp in text_files:
-        content = read_file_data(fp)
-        if content:
-            text_tuples.append((fp, content))
-
-    data_images = process_image_files(image_files, image_inference, text_inference, silent=silent_mode, log_file=log_file)
-    data_texts = process_text_files(text_tuples, text_inference, silent=silent_mode, log_file=log_file)
-
-    all_data = data_images + data_texts
-    renamed_files = set()
-    processed_files = set()
-
-    operations = compute_operations(
-        all_data,
-        output_path,
-        renamed_files,
-        processed_files
-    )
-
-    print("-" * 50)
-    print("생성될 폴더 구조 미리보기:")
-    simulated_tree = simulate_directory_tree(operations, output_path)
-    print_simulated_tree(simulated_tree)
-    print("-" * 50)
-
-    if get_yes_no("위와 같이 정리를 진행할까요? (yes/no): "):
-        os.makedirs(output_path, exist_ok=True)
-        execute_operations(operations, dry_run=False, silent=silent_mode, log_file=log_file)
-        print("정리 완료!")
-
-if __name__ == '__main__':
-    main()
+    return foldername or '기타', filename or filename_ko, description
