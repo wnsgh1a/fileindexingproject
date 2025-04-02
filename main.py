@@ -10,9 +10,7 @@ from file_utils import (
 
 from data_processing_common import (
     compute_operations,
-    execute_operations,
-    process_files_by_date,
-    process_files_by_type,
+    execute_operations
 )
 
 from text_data_processing import (
@@ -21,6 +19,7 @@ from text_data_processing import (
 
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
+from content_classifier import classify_by_filename_ai
 
 def ensure_nltk_data():
     import nltk
@@ -39,7 +38,7 @@ def initialize_models():
                 local_path=r"C:\\Users\\qazws\\git연습용\\fileindexer\\models\\Llama-3.2-3B-Instruct-IQ3_M.gguf",
                 stop_words=[],
                 temperature=0.5,
-                max_new_tokens=3000,
+                max_new_tokens=256,
                 top_k=3,
                 top_p=0.3,
                 profiling=False
@@ -82,25 +81,6 @@ def get_yes_no(prompt):
             exit()
         else:
             print("Please enter 'yes' or 'no'. To exit, type '/exit'.")
-
-def get_mode_selection():
-    while True:
-        print("Please choose the mode to organize your files:")
-        print("1. By Content")
-        print("2. By Date")
-        print("3. By Type")
-        response = input("Enter 1, 2, or 3 (or type '/exit' to exit): ").strip()
-        if response == '/exit':
-            print("Exiting program.")
-            exit()
-        elif response == '1':
-            return 'content'
-        elif response == '2':
-            return 'date'
-        elif response == '3':
-            return 'type'
-        else:
-            print("Invalid selection. Please enter 1, 2, or 3. To exit, type '/exit'.")
 
 def main():
     ensure_nltk_data()
@@ -161,93 +141,85 @@ def main():
             display_directory_tree(input_path)
             print("*" * 50)
 
-        while True:
-            mode = get_mode_selection()
-            if mode == 'content':
-                if not silent_mode:
-                    print("Checking if the model is already downloaded. If not, downloading it now.")
-                initialize_models()
+        if not silent_mode:
+            print("Checking if the model is already downloaded. If not, downloading it now.")
+        initialize_models()
 
-                if not silent_mode:
-                    print("*" * 50)
-                    print("The file upload was successful. Processing may take a few minutes.")
-                    print("*" * 50)
+        if not silent_mode:
+            print("*" * 50)
+            print("The file upload was successful. Processing may take a few minutes.")
+            print("*" * 50)
 
-                _, text_files = separate_files_by_type(file_paths)
-                text_tuples = []
-                for fp in text_files:
-                    text_content = read_file_data(fp)
-                    if text_content is None:
-                        message = f"Unsupported or unreadable text file format: {fp}"
-                        if silent_mode:
-                            with open(log_file, 'a', encoding='utf-8') as f:
-                                f.write(message + '\n')
-                        else:
-                            print(message)
-                        continue
-                    text_tuples.append((fp, text_content))
+        # 1차: 파일명 기반 분류
+        filename_classified = classify_by_filename_ai(file_paths, text_inference, silent=silent_mode, log_file=log_file)
 
-                data_texts = process_text_files(text_tuples, text_inference, silent=silent_mode, log_file=log_file)
-                renamed_files = set()
-                processed_files = set()
-                operations = compute_operations(
-                    data_texts,
-                    output_path,
-                    renamed_files,
-                    processed_files,
-                    preserve_filename=True  # ⭐ 파일명 원본 유지
-                )
-            elif mode == 'date':
-                operations = process_files_by_date(file_paths, output_path, dry_run=False, silent=silent_mode, log_file=log_file)
-            elif mode == 'type':
-                operations = process_files_by_type(file_paths, output_path, dry_run=False, silent=silent_mode, log_file=log_file)
+        # 2차: 내용 기반 분류 (파일명 분류 실패한 것만)
+        text_files_for_content = []
+        for item in filename_classified:
+            if item["category"] is None:
+                text_content = read_file_data(item["path"])
+                if text_content:
+                    text_files_for_content.append((item["path"], text_content))
+
+        content_classified = process_text_files(text_files_for_content, text_inference, silent=silent_mode, log_file=log_file)
+
+        # 결과 통합
+        final_classification = []
+        for item in filename_classified:
+            if item["category"]:
+                final_classification.append({"file_path": item["file_path"], "category": item["category"]})
             else:
-                print("Invalid mode selected.")
-                return
+                matched = next((c for c in content_classified if c["path"] == item["path"]), None)
+                if matched:
+                    final_classification.append(matched)
 
+        renamed_files = set()
+        processed_files = set()
+        operations = compute_operations(
+            final_classification,
+            output_path,
+            renamed_files,
+            processed_files,
+            preserve_filename=True
+        )
+
+        print("-" * 50)
+        message = "Proposed directory structure:"
+        if silent_mode:
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(message + '\n')
+        else:
+            print(message)
+            print(os.path.abspath(output_path))
+            simulated_tree = simulate_directory_tree(operations, output_path)
+            print_simulated_tree(simulated_tree)
             print("-" * 50)
-            message = "Proposed directory structure:"
+
+        proceed = get_yes_no("Would you like to proceed with these changes? (yes/no): ")
+        if proceed:
+            os.makedirs(output_path, exist_ok=True)
+            message = "Performing file operations..."
             if silent_mode:
                 with open(log_file, 'a', encoding='utf-8') as f:
                     f.write(message + '\n')
             else:
                 print(message)
-                print(os.path.abspath(output_path))
-                simulated_tree = simulate_directory_tree(operations, output_path)
-                print_simulated_tree(simulated_tree)
-                print("-" * 50)
-
-            proceed = get_yes_no("Would you like to proceed with these changes? (yes/no): ")
-            if proceed:
-                os.makedirs(output_path, exist_ok=True)
-                message = "Performing file operations..."
-                if silent_mode:
-                    with open(log_file, 'a', encoding='utf-8') as f:
-                        f.write(message + '\n')
-                else:
-                    print(message)
-                execute_operations(
-                    operations,
-                    dry_run=False,
-                    silent=silent_mode,
-                    log_file=log_file
-                )
-                message = "The files have been organized successfully."
-                if silent_mode:
-                    with open(log_file, 'a', encoding='utf-8') as f:
-                        f.write("-" * 50 + '\n' + message + '\n' + "-" * 50 + '\n')
-                else:
-                    print("-" * 50)
-                    print(message)
-                    print("-" * 50)
-                break
+            execute_operations(
+                operations,
+                dry_run=False,
+                silent=silent_mode,
+                log_file=log_file
+            )
+            message = "The files have been organized successfully."
+            if silent_mode:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write("-" * 50 + '\n' + message + '\n' + "-" * 50 + '\n')
             else:
-                another_sort = get_yes_no("Would you like to choose another sorting method? (yes/no): ")
-                if another_sort:
-                    continue
-                else:
-                    print("Operation canceled by the user.")
-                    break
+                print("-" * 50)
+                print(message)
+                print("-" * 50)
+        else:
+            print("Operation canceled by the user.")
 
         another_directory = get_yes_no("Would you like to organize another directory? (yes/no): ")
         if not another_directory:
