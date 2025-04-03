@@ -1,43 +1,84 @@
 import os
+import re
+import difflib
 
-def classify_by_filename_ai(file_paths, model, silent=False, log_file=None):
+# 🔧 그룹핑: 유사한 파일명끼리 그룹으로 묶기
+def group_similar_filenames(file_paths, threshold=0.7):
+    filenames = [os.path.basename(path) for path in file_paths]
+    groups = []
+    assigned = [False] * len(filenames)
+
+    for i, fname in enumerate(filenames):
+        if assigned[i]:
+            continue
+        group = [file_paths[i]]
+        assigned[i] = True
+        for j in range(i + 1, len(filenames)):
+            if not assigned[j]:
+                ratio = difflib.SequenceMatcher(None, fname, filenames[j]).ratio()
+                if ratio >= threshold:
+                    group.append(file_paths[j])
+                    assigned[j] = True
+        groups.append(group)
+
+    return groups
+
+# 🔍 폴더명 정제
+def clean_category(raw_text):
+    line = raw_text.strip().split("\n")[0]
+    line = re.sub(r"^답변[:：]?\s*", "", line)
+    line = re.sub(r"^답을 입력하세요[:：]?\s*", "", line)
+    line = re.sub(r"^\ud83d\udcc2.*?\.docx\"\s*", "", line)
+    line = re.sub(r"^파일 이름[:：]?\s*", "", line)
+    line = re.sub(r'[\"“”‘’]', '', line)
+    line = re.sub(r'[\\/:*?"<>|]', '', line)
+
+    if not re.search(r'[가-힣]', line):
+        return None
+    if not line or line.lower() in ["기타", "알 수 없음", "모름", "unknown"] or len(line.strip()) < 2:
+        return None
+
+    return line.strip()
+
+# 🎯 그룹 단위로 AI 호출하여 분류 실행
+def classify_by_filename_grouped(file_paths, model, silent=False, log_file=None):
     results = []
+    grouped_files = group_similar_filenames(file_paths, threshold=0.8)
 
-    for path in file_paths:
-        filename = os.path.basename(path)
+    for group in grouped_files:
+        filenames = [os.path.basename(p) for p in group]
 
-        prompt = f"""\ 
-다음은 파일 이름입니다: "{filename}"
-이 파일이 어떤 주제(예: 과제, 수업, 논문, 요약, 프로젝트 등)에 해당하는지 아주 간결한 한국어 분류명 하나로 대답해.
-반드시 짧고 명확한 카테고리 이름만 출력하고, 다른 말은 절대 하지 마.
-예시: 자료구조, 데이터베이스 정규화, 알고리즘, 논문 초안 등
-정확한 주제명을 한 단어 또는 짧은 구절로 말해.
-의견을 묻는 것도 아니고, 무조건 명확한 답 하나만 줘.
+        prompt = f"""
+다음은 유사한 파일 이름들의 목록입니다:
+{chr(10).join(f'- {name}' for name in filenames)}
+
+이 파일들의 공통된 주제 하나를 짧은 한국어 폴더명으로 알려주세요.
+"의미상으로 공통된 주제"가 있는 거 같은 경우 하나로 묶으세요.
+조건:
+- 반드시 **한국어**로 출력하세요.
+- 절대 설명하지 말고
+- 딱 한 줄로, 의미 있는 주제 하나만 (예: 자료구조, 데이터베이스 정규화, 알고리즘)
+- 기타/모름/답을 입력하세요 등은 절대 안됨
 """
-
         try:
             response = model.create_completion(prompt)
-            print(f"🔍 모델 원응답: {repr(response)}")
-
             raw_text = response["choices"][0]["text"]
-            category = raw_text.strip().split("\n")[0]  # ✅ 첫 줄만 추출해서 카테고리로 사용
+            category = clean_category(raw_text)
         except Exception as e:
-            print(f"❌ 오류: {e}")
+            if not silent:
+                print(f"❌ 오류 (LLM 응답 실패): {e}")
             category = None
 
+        for path in group:
+            results.append({
+                "file_path": path,
+                "foldername": category
+            })
 
-        if not category or len(category) < 2 or category.lower() in ["기타", "알 수 없음", "모름", "unknown"]:
-            category = None
-
-        if silent and log_file:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(f"[파일명 분류] {filename} -> {category if category else '분류 실패'}\n")
-        elif not silent:
-            print(f"[파일명 분류] {filename} → {category if category else '❌ 실패'}")
-
-        results.append({
-            "file_path": path,
-            "category": category
-        })
+            if silent and log_file:
+                with open(log_file, 'a', encoding='utf-8') as f:
+                    f.write(f"[파일명 그룹 분류] {os.path.basename(path)} -> {category if category else '분류 실패'}\n")
+            elif not silent:
+                print(f"[파일명 그룹 분류] {os.path.basename(path)} → {category if category else '❌ 실패'}")
 
     return results

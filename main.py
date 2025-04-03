@@ -19,7 +19,7 @@ from text_data_processing import (
 
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
-from content_classifier import classify_by_filename_ai
+from content_classifier import classify_by_filename_grouped
 
 def ensure_nltk_data():
     import nltk
@@ -35,16 +35,16 @@ def initialize_models():
         with filter_specific_output():
             text_inference = NexaTextInference(
                 model_path=None,
-                local_path=r"C:\\Users\\qazws\\git연습용\\fileindexer\\models\\Llama-3.2-3B-Instruct-IQ3_M.gguf",
+                local_path=r"C:\\models\\ggml-model-Q4_K_M.gguf",
                 stop_words=[],
-                temperature=0.5,
+                temperature=0.0,
                 max_new_tokens=256,
                 top_k=3,
                 top_p=0.3,
                 profiling=False
             )
 
-        print("✅ 텍스트 모델 로컬 로딩 완료!")
+        print("\u2705 \ud14d\uc2a4\ud2b8 \ubaa8\ub378 \ub85c\uceec \ub85c\ub4dc \uc644\ub8cc!")
         print("**----------------------------------------------**")
         print("**       Text inference model initialized       **")
         print("**----------------------------------------------**")
@@ -62,11 +62,11 @@ def simulate_directory_tree(operations, base_path):
     return tree
 
 def print_simulated_tree(tree, prefix=''):
-    pointers = ['├── '] * (len(tree) - 1) + ['└── '] if tree else []
+    pointers = ['\u251c\u2500\u2500 '] * (len(tree) - 1) + ['\u2514\u2500\u2500 '] if tree else []
     for pointer, key in zip(pointers, tree):
         print(prefix + pointer + key)
         if tree[key]:
-            extension = '│   ' if pointer == '├── ' else '    '
+            extension = '\u2502   ' if pointer == '\u251c\u2500\u2500 ' else '    '
             print_simulated_tree(tree[key], prefix + extension)
 
 def get_yes_no(prompt):
@@ -150,26 +150,23 @@ def main():
             print("The file upload was successful. Processing may take a few minutes.")
             print("*" * 50)
 
-        # 1차: 파일명 기반 분류
-        filename_classified = classify_by_filename_ai(file_paths, text_inference, silent=silent_mode, log_file=log_file)
+        filename_classified = classify_by_filename_grouped(file_paths, text_inference, silent=silent_mode, log_file=log_file)
 
-        # 2차: 내용 기반 분류 (파일명 분류 실패한 것만)
         text_files_for_content = []
         for item in filename_classified:
-            if item["category"] is None:
-                text_content = read_file_data(item["path"])
+            if item["foldername"] is None:
+                text_content = read_file_data(item["file_path"])
                 if text_content:
-                    text_files_for_content.append((item["path"], text_content))
+                    text_files_for_content.append((item["file_path"], text_content))
 
         content_classified = process_text_files(text_files_for_content, text_inference, silent=silent_mode, log_file=log_file)
 
-        # 결과 통합
         final_classification = []
         for item in filename_classified:
-            if item["category"]:
-                final_classification.append({"file_path": item["file_path"], "category": item["category"]})
+            if item["foldername"]:
+                final_classification.append({"file_path": item["file_path"], "foldername": item["foldername"]})
             else:
-                matched = next((c for c in content_classified if c["path"] == item["path"]), None)
+                matched = next((c for c in content_classified if c["file_path"] == item["file_path"]), None)
                 if matched:
                     final_classification.append(matched)
 
