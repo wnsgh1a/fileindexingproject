@@ -30,6 +30,8 @@ def clean_category(raw_text):
     line = re.sub(r"^답을 입력하세요[:：]?\s*", "", line)
     line = re.sub(r"^\ud83d\udcc2.*?\.docx\"\s*", "", line)
     line = re.sub(r"^파일 이름[:：]?\s*", "", line)
+    line = re.sub(r"^출력[:：]?\s*", "", line)  # ✅ 추가
+    line = re.sub(r"^예시 출력[:：]?\s*", "", line)  # ✅ 추가
     line = re.sub(r'[\"“”‘’]', '', line)
     line = re.sub(r'[\\/:*?"<>|]', '', line)
 
@@ -52,13 +54,13 @@ def classify_by_filename_grouped(file_paths, model, silent=False, log_file=None)
 다음은 유사한 파일 이름들의 목록입니다:
 {chr(10).join(f'- {name}' for name in filenames)}
 
-이 파일들의 공통된 주제 하나를 짧은 한국어 폴더명으로 알려주세요.
-"의미상으로 공통된 주제"가 있는 거 같은 경우 하나로 묶으세요.
+이 파일들의 공통 주제를 대표하는 **짧고 명확한 한국어 폴더명**을 한 줄로 출력하세요.
+
 조건:
-- 반드시 **한국어**로 출력하세요.
-- 절대 설명하지 말고
-- 딱 한 줄로, 의미 있는 주제 하나만 (예: 자료구조, 데이터베이스 정규화, 알고리즘)
-- 기타/모름/답을 입력하세요 등은 절대 안됨
+- 반드시 **의미 있는 한국어 명사**여야 하며, 최대 6글자 이내로 요약하세요.
+- 설명하지 마세요. 예시는 금지.
+- "기타", "모름", "출력" 같은 일반 단어는 사용하지 마세요.
+- 출력은 오직 **한 줄**, 폴더명만!
 """
         try:
             response = model.create_completion(prompt)

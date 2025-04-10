@@ -8,28 +8,25 @@ from nltk.probability import FreqDist
 from nltk.stem import WordNetLemmatizer
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn
 from data_processing_common import sanitize_filename
-from transformers import MarianMTModel, MarianTokenizer
 
-# ✅ 한영 번역기 로딩 (Helsinki-NLP)
-model_name = 'Helsinki-NLP/opus-mt-ko-en'
-tokenizer = MarianTokenizer.from_pretrained(model_name)
-translator = MarianMTModel.from_pretrained(model_name)
+# 필요한 nltk 리소스 다운로드
+nltk.download('punkt', quiet=True)
+nltk.download('stopwords', quiet=True)
+nltk.download('wordnet', quiet=True)
 
-def translate_korean_to_english(text):
-    """Translate Korean to English using a pretrained MarianMT model."""
-    batch = tokenizer.prepare_seq2seq_batch([text], return_tensors="pt", padding=True)
-    gen = translator.generate(**batch)
-    translated = tokenizer.batch_decode(gen, skip_special_tokens=True)
-    return translated[0] if translated else text
+# ✅ MarianMT 번역기 제거: 이제 한글 전용 모델 사용
+# ✅ 모든 프롬프트는 한글로 변경
 
 def summarize_text_content(text, text_inference):
-    """Summarize the given text content."""
-    prompt = f"""Provide a concise and accurate summary of the following text, focusing on the main ideas and key details.
-Limit your summary to a maximum of 150 words.
+    """요약: 텍스트 내용을 간결하게 요약"""
+    prompt = f"""
+다음 글의 주요 내용을 요약해 주세요. 핵심 주제와 내용을 150단어 이내로 간결하게 정리해주세요.
 
-Text: {text}
+텍스트:
+{text}
 
-Summary:"""
+요약:
+"""
     response = text_inference.create_completion(prompt)
     return response['choices'][0]['text'].strip()
 
@@ -45,11 +42,10 @@ def process_single_text_file(args, text_inference, silent=False, log_file=None):
         foldername, filename, description = generate_text_metadata(text, file_path, progress, task_id, text_inference)
     end_time = time.time()
     message = f"File: {file_path}\nTime taken: {end_time - start_time:.2f} seconds\nDescription: {description}\nFolder name: {foldername}\nGenerated filename: {filename}\n"
-    if silent:
-        if log_file:
-            with open(log_file, 'a') as f:
-                f.write(message + '\n')
-    else:
+    if silent and log_file:
+        with open(log_file, 'a', encoding='utf-8') as f:
+            f.write(message + '\n')
+    elif not silent:
         print(message)
     return {
         'file_path': file_path,
@@ -68,39 +64,42 @@ def process_text_files(text_tuples, text_inference, silent=False, log_file=None)
 def generate_text_metadata(text, file_path, progress, task_id, text_inference):
     total_steps = 3
     filename_ko = os.path.splitext(os.path.basename(file_path))[0]
-    filename_en = translate_korean_to_english(filename_ko)
-    lemmatizer = WordNetLemmatizer()
-    stop_words = set(stopwords.words('english'))
-    unwanted_words = set([...])  # 기존 unwanted 단어들 생략
-    all_unwanted = unwanted_words.union(stop_words)
 
-    # Step 1: Summary
+    # Step 1: 요약 생성
     description = summarize_text_content(text, text_inference)
     progress.update(task_id, advance=1 / total_steps)
 
-    # Step 2: Filename from translated filename
+    # Step 2: 파일명 생성 (한글 기준)
     filename_prompt = f"""
-Based on the file name below, generate a descriptive but concise filename (max 3 words) using nouns only.
-Avoid words like file, doc, pdf, text.
-Filename: {filename_en}
-Output only the filename:
+다음 파일명을 참고하여 간결하고 명확한 한글 파일명을 만들어주세요. 
+3단어 이내로 구성하고, 일반적인 단어(문서, 파일 등)는 피해주세요.
+
+기존 파일명: {filename_ko}
+
+파일명:
 """
     filename_response = text_inference.create_completion(filename_prompt)
     raw_filename = filename_response['choices'][0]['text'].strip()
     filename = sanitize_filename(raw_filename, max_words=3)
     progress.update(task_id, advance=1 / total_steps)
 
-    # Step 3: Folder name
+    # Step 3: 폴더명 생성 (요약 내용 + 파일명 기반)
     folder_prompt = f"""
-Based on the translated filename and document summary below, generate a general topic folder name (max 2 words).
-Use nouns only. No generic words like 'document', 'untitled'.
-Translated Filename: {filename_en}
-Summary: {description}
-Category:
+다음 파일명과 문서 요약을 참고하여 해당 문서가 들어갈 주제 폴더명을 정해주세요.
+❗ 폴더명은 반드시 2단어 이내의 한국어 '주제명'이어야 하며, 문장이나 설명을 쓰지 마세요.
+
+파일명: {filename_ko}
+요약: {description}
+
+주제 폴더명 (예: 데이터 정규화, 자기 개발, 알고리즘 등):
 """
     folder_response = text_inference.create_completion(folder_prompt)
     raw_folder = folder_response['choices'][0]['text'].strip()
     foldername = sanitize_filename(raw_folder, max_words=2)
     progress.update(task_id, advance=1 / total_steps)
 
-    return foldername or '기타', filename or filename_ko, description
+    # 폴더명 이상치 필터링
+    if not foldername or len(foldername) < 2 or len(foldername) > 20:
+        foldername = '기타'
+
+    return foldername, filename or filename_ko, description

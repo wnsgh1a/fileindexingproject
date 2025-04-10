@@ -1,6 +1,8 @@
 import os
 import time
-
+import re
+from difflib import get_close_matches
+from datetime import datetime
 from file_utils import (
     display_directory_tree,
     collect_file_paths,
@@ -20,6 +22,20 @@ from text_data_processing import (
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
 from content_classifier import classify_by_filename_grouped
+
+def normalize_korean_foldername(text):
+    """한글 폴더명에서 공백/특수기호/밑줄 제거하여 병합 정확도 향상"""
+    return re.sub(r'[\s_]', '', text.strip())
+
+def normalize_foldername(foldername, existing_names, threshold=0.8):
+    """기존 폴더명과 유사하면 병합 (전처리 포함)"""
+    simplified_input = normalize_korean_foldername(foldername)
+    simplified_existing = {name: normalize_korean_foldername(name) for name in existing_names}
+
+    for orig_name, simplified in simplified_existing.items():
+        if get_close_matches(simplified_input, [simplified], n=1, cutoff=threshold):
+            return orig_name  # 기존 폴더명으로 병합
+    return foldername  # 새 폴더명 사용
 
 def ensure_nltk_data():
     import nltk
@@ -43,8 +59,7 @@ def initialize_models():
                 top_p=0.3,
                 profiling=False
             )
-
-        print("\u2705 \ud14d\uc2a4\ud2b8 \ubaa8\ub378 \ub85c\uceec \ub85c\ub4dc \uc644\ub8cc!")
+        print("\u2705 텍스트 모델 로컬 로드 완료!")
         print("**----------------------------------------------**")
         print("**       Text inference model initialized       **")
         print("**----------------------------------------------**")
@@ -82,6 +97,13 @@ def get_yes_no(prompt):
         else:
             print("Please enter 'yes' or 'no'. To exit, type '/exit'.")
 
+def get_quarter_path(file_path):
+    created_time = os.path.getctime(file_path)
+    dt = datetime.fromtimestamp(created_time)
+    year = str(dt.year)
+    quarter = (dt.month - 1) // 3 + 1
+    return os.path.join(year, f"{quarter}분기")
+
 def main():
     ensure_nltk_data()
     dry_run = True
@@ -103,52 +125,16 @@ def main():
                 print(message)
             input_path = input("Enter the path of the directory you want to organize: ").strip()
 
-        message = f"Input path successfully uploaded: {input_path}"
-        if silent_mode:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(message + '\n')
-        else:
-            print(message)
-        if not silent_mode:
-            print("-" * 50)
-
         output_path = input("Enter the path to store organized files and folders (press Enter to use 'organized_folder' in the input directory): ").strip()
         if not output_path:
             output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
 
-        message = f"Output path successfully set to: {output_path}"
-        if silent_mode:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(message + '\n')
-        else:
-            print(message)
-        if not silent_mode:
-            print("-" * 50)
-
-        start_time = time.time()
         file_paths = collect_file_paths(input_path)
-        end_time = time.time()
+        from folder_structure import organize_by_year_and_quarter
+        input_path = organize_by_year_and_quarter(input_path, output_dir=output_path)
+        file_paths = collect_file_paths(input_path)
 
-        message = f"Time taken to load file paths: {end_time - start_time:.2f} seconds"
-        if silent_mode:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(message + '\n')
-        else:
-            print(message)
-        if not silent_mode:
-            print("-" * 50)
-            print("Directory tree before organizing:")
-            display_directory_tree(input_path)
-            print("*" * 50)
-
-        if not silent_mode:
-            print("Checking if the model is already downloaded. If not, downloading it now.")
         initialize_models()
-
-        if not silent_mode:
-            print("*" * 50)
-            print("The file upload was successful. Processing may take a few minutes.")
-            print("*" * 50)
 
         filename_classified = classify_by_filename_grouped(file_paths, text_inference, silent=silent_mode, log_file=log_file)
 
@@ -162,64 +148,56 @@ def main():
         content_classified = process_text_files(text_files_for_content, text_inference, silent=silent_mode, log_file=log_file)
 
         final_classification = []
+        existing_names = set()
+
         for item in filename_classified:
-            if item["foldername"]:
-                final_classification.append({"file_path": item["file_path"], "foldername": item["foldername"]})
-            else:
+            base_foldername = item["foldername"]
+
+            if not base_foldername:
                 matched = next((c for c in content_classified if c["file_path"] == item["file_path"]), None)
                 if matched:
-                    final_classification.append(matched)
+                    base_foldername = matched["foldername"]
 
-        renamed_files = set()
-        processed_files = set()
+            if base_foldername:
+                base_foldername = normalize_foldername(base_foldername, existing_names)
+                existing_names.add(base_foldername)
+                quarter_path = get_quarter_path(item["file_path"])
+                full_folder_path = os.path.join(quarter_path, base_foldername)
+                final_classification.append({
+                    "file_path": item["file_path"],
+                    "foldername": full_folder_path
+                })
+
         operations = compute_operations(
             final_classification,
             output_path,
-            renamed_files,
-            processed_files,
+            renamed_files=set(),
+            processed_files=set(),
             preserve_filename=True
         )
 
         print("-" * 50)
-        message = "Proposed directory structure:"
-        if silent_mode:
-            with open(log_file, 'a', encoding='utf-8') as f:
-                f.write(message + '\n')
-        else:
-            print(message)
-            print(os.path.abspath(output_path))
-            simulated_tree = simulate_directory_tree(operations, output_path)
-            print_simulated_tree(simulated_tree)
-            print("-" * 50)
+        print("Proposed directory structure:")
+        print(os.path.abspath(output_path))
+        simulated_tree = simulate_directory_tree(operations, output_path)
+        print_simulated_tree(simulated_tree)
+        print("-" * 50)
 
-        proceed = get_yes_no("Would you like to proceed with these changes? (yes/no): ")
-        if proceed:
+        if get_yes_no("Would you like to proceed with these changes? (yes/no): "):
             os.makedirs(output_path, exist_ok=True)
-            message = "Performing file operations..."
-            if silent_mode:
-                with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(message + '\n')
-            else:
-                print(message)
             execute_operations(
                 operations,
                 dry_run=False,
                 silent=silent_mode,
                 log_file=log_file
             )
-            message = "The files have been organized successfully."
-            if silent_mode:
-                with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write("-" * 50 + '\n' + message + '\n' + "-" * 50 + '\n')
-            else:
-                print("-" * 50)
-                print(message)
-                print("-" * 50)
+            print("-" * 50)
+            print("The files have been organized successfully.")
+            print("-" * 50)
         else:
             print("Operation canceled by the user.")
 
-        another_directory = get_yes_no("Would you like to organize another directory? (yes/no): ")
-        if not another_directory:
+        if not get_yes_no("Would you like to organize another directory? (yes/no): "):
             break
 
 if __name__ == '__main__':
