@@ -10,7 +10,6 @@ def get_quarter_label_from_timestamp(timestamp):
     return year, quarter_korean
 
 def organize_by_year_and_quarter(base_dir, output_dir=None):
-    from datetime import datetime
     if output_dir is None:
         output_dir = os.path.join(base_dir, "organized_by_quarter")
 
@@ -22,13 +21,14 @@ def organize_by_year_and_quarter(base_dir, output_dir=None):
             continue
 
         created_time = os.path.getctime(filepath)
-        dt = datetime.fromtimestamp(created_time)
-        year = str(dt.year)
-        quarter = f"Q{(dt.month - 1) // 3 + 1}"
+        year, quarter_korean = get_quarter_label_from_timestamp(created_time)
 
-        target_dir = os.path.join(output_dir, year, quarter)
+        target_dir = os.path.join(output_dir, year, quarter_korean)  # ✅ '1분기' 사용
         os.makedirs(target_dir, exist_ok=True)
         shutil.move(filepath, os.path.join(target_dir, filename))
-        print(f"[이동 완료] {filename} → {year}/{quarter}/")
+        print(f"[이동 완료] {filename} → {year}/{quarter_korean}/")  # ✅ 출력도 수정
+
+    return output_dir
+
 
     return output_dir  # ✅ 정리된 폴더를 반환

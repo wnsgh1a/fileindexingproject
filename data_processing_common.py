@@ -1,4 +1,5 @@
 import os
+import shutil
 import re
 import datetime
 from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn
@@ -97,7 +98,7 @@ def compute_operations(data_list, output_path, renamed_files, processed_files, p
     return operations
 
 def execute_operations(operations, dry_run=False, silent=False, log_file=None):
-    """Create hardlinks for the operations."""
+    """Move files according to the operations."""
     total = len(operations)
     with Progress(
         TextColumn("[progress.description]{task.description}"),
@@ -109,14 +110,13 @@ def execute_operations(operations, dry_run=False, silent=False, log_file=None):
         for op in operations:
             src = op['source']
             dst = op['destination']
-            link_type = op['link_type']
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             try:
                 if not dry_run:
-                    os.link(src, dst)
-                msg = f"Created {link_type} from '{src}' to '{dst}'"
+                    shutil.move(src, dst)
+                msg = f"Moved file from '{src}' to '{dst}'"
             except Exception as e:
-                msg = f"Error creating {link_type} from '{src}' to '{dst}': {e}"
+                msg = f"Error moving file from '{src}' to '{dst}': {e}"
             if not silent:
                 print(msg)
             elif log_file:

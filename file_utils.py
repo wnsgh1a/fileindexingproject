@@ -66,7 +66,7 @@ def read_ppt_file(file_path):
         return None
 
 def read_file_data(file_path):
-    """Read content from a file based on its extension."""
+    """파일 확장자에 따라 내용을 읽어옴 (hwp는 무시)"""
     ext = os.path.splitext(file_path.lower())[1]
     if ext in ['.txt', '.md']:
         return read_text_file(file_path)
@@ -78,6 +78,9 @@ def read_file_data(file_path):
         return read_spreadsheet_file(file_path)
     elif ext in ['.ppt', '.pptx']:
         return read_ppt_file(file_path)
+    elif ext == '.hwp':
+        print(f"⚠️ HWP 파일 무시: {file_path}")
+        return None
     else:
         return None
 

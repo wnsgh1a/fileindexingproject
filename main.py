@@ -6,36 +6,25 @@ from datetime import datetime
 from file_utils import (
     display_directory_tree,
     collect_file_paths,
-    separate_files_by_type,
     read_file_data
 )
-
-from data_processing_common import (
-    compute_operations,
-    execute_operations
-)
-
-from text_data_processing import (
-    process_text_files
-)
-
+from data_processing_common import compute_operations, execute_operations
+from text_data_processing import process_text_files
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
-from content_classifier import classify_by_filename_grouped
+from content_classifier import classify_filenames_bulk, extract_examples_from_log, remove_duplicate_examples
+from fileremover import isolate_all as process_delete_candidates #✅ fileromover.py 임포트하기기
 
 def normalize_korean_foldername(text):
-    """한글 폴더명에서 공백/특수기호/밑줄 제거하여 병합 정확도 향상"""
     return re.sub(r'[\s_]', '', text.strip())
 
-def normalize_foldername(foldername, existing_names, threshold=0.8):
-    """기존 폴더명과 유사하면 병합 (전처리 포함)"""
+def normalize_foldername(foldername, existing_names, threshold=0.65):
     simplified_input = normalize_korean_foldername(foldername)
     simplified_existing = {name: normalize_korean_foldername(name) for name in existing_names}
-
     for orig_name, simplified in simplified_existing.items():
         if get_close_matches(simplified_input, [simplified], n=1, cutoff=threshold):
-            return orig_name  # 기존 폴더명으로 병합
-    return foldername  # 새 폴더명 사용
+            return orig_name
+    return foldername
 
 def ensure_nltk_data():
     import nltk
@@ -77,25 +66,12 @@ def simulate_directory_tree(operations, base_path):
     return tree
 
 def print_simulated_tree(tree, prefix=''):
-    pointers = ['\u251c\u2500\u2500 '] * (len(tree) - 1) + ['\u2514\u2500\u2500 '] if tree else []
+    pointers = ['├── '] * (len(tree) - 1) + ['└── '] if tree else []
     for pointer, key in zip(pointers, tree):
         print(prefix + pointer + key)
         if tree[key]:
-            extension = '\u2502   ' if pointer == '\u251c\u2500\u2500 ' else '    '
+            extension = '│   ' if pointer == '├── ' else '    '
             print_simulated_tree(tree[key], prefix + extension)
-
-def get_yes_no(prompt):
-    while True:
-        response = input(prompt).strip().lower()
-        if response in ('yes', 'y'):
-            return True
-        elif response in ('no', 'n'):
-            return False
-        elif response == '/exit':
-            print("Exiting program.")
-            exit()
-        else:
-            print("Please enter 'yes' or 'no'. To exit, type '/exit'.")
 
 def get_quarter_path(file_path):
     created_time = os.path.getctime(file_path)
@@ -106,99 +82,94 @@ def get_quarter_path(file_path):
 
 def main():
     ensure_nltk_data()
-    dry_run = True
     print("-" * 50)
     print("**NOTE: Silent mode logs all outputs to a text file instead of displaying them in the terminal.")
-    silent_mode = get_yes_no("Would you like to enable silent mode? (yes/no): ")
-    log_file = 'operation_log.txt' if silent_mode else None
+    silent_mode = True
+    log_file = 'operation_log.txt'
 
-    while True:
-        if not silent_mode:
-            print("-" * 50)
+    print("-" * 50)
+    input_path = input("Enter the path of the directory you want to organize: ").strip()
+    while not os.path.exists(input_path):
+        print(f"Input path {input_path} does not exist. Please enter a valid path.")
         input_path = input("Enter the path of the directory you want to organize: ").strip()
-        while not os.path.exists(input_path):
-            message = f"Input path {input_path} does not exist. Please enter a valid path."
-            if silent_mode:
-                with open(log_file, 'a', encoding='utf-8') as f:
-                    f.write(message + '\n')
-            else:
-                print(message)
-            input_path = input("Enter the path of the directory you want to organize: ").strip()
+    print("-" * 50)
+    print("Processing delete candidates (duplicate and old versions)...")
+    process_delete_candidates(input_path) #✅ fileromover.py 내의 함수 실행행
+    print("Delete candidate processing completed.")
+    print("-" * 50)
+ 
+    output_path = input("Enter the path to store organized files and folders (press Enter to use 'organized_folder' in the input directory): ").strip()
+    if not output_path:
+        output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
 
-        output_path = input("Enter the path to store organized files and folders (press Enter to use 'organized_folder' in the input directory): ").strip()
-        if not output_path:
-            output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
+    
+    start_time = time.time()
+    file_paths = collect_file_paths(input_path)
+    file_paths = collect_file_paths(input_path)
+    end_time = time.time()
 
-        file_paths = collect_file_paths(input_path)
-        from folder_structure import organize_by_year_and_quarter
-        input_path = organize_by_year_and_quarter(input_path, output_dir=output_path)
-        file_paths = collect_file_paths(input_path)
+    file_paths = collect_file_paths(input_path)
+    initialize_models()
 
-        initialize_models()
+    examples = extract_examples_from_log(log_file)
+    examples = remove_duplicate_examples(examples, max_examples=50)
 
-        filename_classified = classify_by_filename_grouped(file_paths, text_inference, silent=silent_mode, log_file=log_file)
+    filename_classified = classify_filenames_bulk(file_paths, text_inference, silent=silent_mode, log_file=log_file, extra_examples=examples)
 
-        text_files_for_content = []
-        for item in filename_classified:
-            if item["foldername"] is None:
-                text_content = read_file_data(item["file_path"])
-                if text_content:
-                    text_files_for_content.append((item["file_path"], text_content))
+    text_files_for_content = []
+    for item in filename_classified:
+        if item["foldername"] is None:
+            text_content = read_file_data(item["file_path"])
+            if text_content:
+                text_files_for_content.append((item["file_path"], text_content))
 
-        content_classified = process_text_files(text_files_for_content, text_inference, silent=silent_mode, log_file=log_file)
+    content_classified = process_text_files(text_files_for_content, text_inference, silent=silent_mode, log_file=log_file)
 
-        final_classification = []
-        existing_names = set()
+    final_classification = []
+    existing_names = set()
+    for item in filename_classified:
+        base_foldername = item["foldername"]
+        if not base_foldername:
+            matched = next((c for c in content_classified if c["file_path"] == item["file_path"]), None)
+            if matched:
+                base_foldername = matched["foldername"]
 
-        for item in filename_classified:
-            base_foldername = item["foldername"]
+        if base_foldername:
+            base_foldername = normalize_foldername(base_foldername, existing_names)
+            existing_names.add(base_foldername)
+            quarter_path = get_quarter_path(item["file_path"])
+            full_folder_path = os.path.join(quarter_path, base_foldername)
+            final_classification.append({
+                "file_path": item["file_path"],
+                "foldername": full_folder_path
+            })
 
-            if not base_foldername:
-                matched = next((c for c in content_classified if c["file_path"] == item["file_path"]), None)
-                if matched:
-                    base_foldername = matched["foldername"]
+    operations = compute_operations(
+        final_classification,
+        output_path,
+        renamed_files=set(),
+        processed_files=set(),
+        preserve_filename=True
+    )
 
-            if base_foldername:
-                base_foldername = normalize_foldername(base_foldername, existing_names)
-                existing_names.add(base_foldername)
-                quarter_path = get_quarter_path(item["file_path"])
-                full_folder_path = os.path.join(quarter_path, base_foldername)
-                final_classification.append({
-                    "file_path": item["file_path"],
-                    "foldername": full_folder_path
-                })
+    print("-" * 50)
+    print("Proposed directory structure:")
+    print(os.path.abspath(output_path))
+    simulated_tree = simulate_directory_tree(operations, output_path)
+    print_simulated_tree(simulated_tree)
+    print("-" * 50)
 
-        operations = compute_operations(
-            final_classification,
-            output_path,
-            renamed_files=set(),
-            processed_files=set(),
-            preserve_filename=True
-        )
-
-        print("-" * 50)
-        print("Proposed directory structure:")
-        print(os.path.abspath(output_path))
-        simulated_tree = simulate_directory_tree(operations, output_path)
-        print_simulated_tree(simulated_tree)
-        print("-" * 50)
-
-        if get_yes_no("Would you like to proceed with these changes? (yes/no): "):
-            os.makedirs(output_path, exist_ok=True)
-            execute_operations(
-                operations,
-                dry_run=False,
-                silent=silent_mode,
-                log_file=log_file
-            )
-            print("-" * 50)
-            print("The files have been organized successfully.")
-            print("-" * 50)
-        else:
-            print("Operation canceled by the user.")
-
-        if not get_yes_no("Would you like to organize another directory? (yes/no): "):
-            break
+    # 사용자 확인 후 실제 이동
+    os.makedirs(output_path, exist_ok=True)
+    execute_operations(
+        operations,
+        dry_run=False,  # ✅ 실제 이동 수행
+        silent=silent_mode,
+        log_file=log_file
+    )
+    print("-" * 50)
+    print("The files have been organized successfully.")
+    print("-" * 50)
 
 if __name__ == '__main__':
     main()

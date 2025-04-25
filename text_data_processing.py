@@ -14,15 +14,20 @@ nltk.download('punkt', quiet=True)
 nltk.download('stopwords', quiet=True)
 nltk.download('wordnet', quiet=True)
 
-# ✅ MarianMT 번역기 제거: 이제 한글 전용 모델 사용
-# ✅ 모든 프롬프트는 한글로 변경
+# ✅ 제목/첫 문단만 추출
+
+def extract_title_or_intro(text):
+    lines = [line.strip() for line in text.strip().split('\n') if line.strip()]
+    return '\n'.join(lines[:2]) if lines else ''
 
 def summarize_text_content(text, text_inference):
     """요약: 텍스트 내용을 간결하게 요약"""
+    max_chars = 1500
+    text = text[:max_chars]
     prompt = f"""
-다음 글의 주요 내용을 요약해 주세요. 핵심 주제와 내용을 150단어 이내로 간결하게 정리해주세요.
+다음 글의 주제를 요약해 주세요. 최대 2문장 이내로 간단히 작성해주세요.
 
-텍스트:
+내용:
 {text}
 
 요약:
@@ -66,10 +71,11 @@ def generate_text_metadata(text, file_path, progress, task_id, text_inference):
     filename_ko = os.path.splitext(os.path.basename(file_path))[0]
 
     # Step 1: 요약 생성
-    description = summarize_text_content(text, text_inference)
+    title_or_intro = extract_title_or_intro(text)  # 핵심만 추출
+    description = summarize_text_content(title_or_intro, text_inference)
     progress.update(task_id, advance=1 / total_steps)
 
-    # Step 2: 파일명 생성 (한글 기준)
+    # Step 2: 파일명 생성
     filename_prompt = f"""
 다음 파일명을 참고하여 간결하고 명확한 한글 파일명을 만들어주세요. 
 3단어 이내로 구성하고, 일반적인 단어(문서, 파일 등)는 피해주세요.
@@ -83,7 +89,7 @@ def generate_text_metadata(text, file_path, progress, task_id, text_inference):
     filename = sanitize_filename(raw_filename, max_words=3)
     progress.update(task_id, advance=1 / total_steps)
 
-    # Step 3: 폴더명 생성 (요약 내용 + 파일명 기반)
+    # Step 3: 폴더명 생성
     folder_prompt = f"""
 다음 파일명과 문서 요약을 참고하여 해당 문서가 들어갈 주제 폴더명을 정해주세요.
 ❗ 폴더명은 반드시 2단어 이내의 한국어 '주제명'이어야 하며, 문장이나 설명을 쓰지 마세요.
@@ -98,7 +104,6 @@ def generate_text_metadata(text, file_path, progress, task_id, text_inference):
     foldername = sanitize_filename(raw_folder, max_words=2)
     progress.update(task_id, advance=1 / total_steps)
 
-    # 폴더명 이상치 필터링
     if not foldername or len(foldername) < 2 or len(foldername) > 20:
         foldername = '기타'
 
