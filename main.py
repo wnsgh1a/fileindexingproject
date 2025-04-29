@@ -3,17 +3,13 @@ import time
 import re
 from difflib import get_close_matches
 from datetime import datetime
-from file_utils import (
-    display_directory_tree,
-    collect_file_paths,
-    read_file_data
-)
+from file_utils import collect_file_paths, read_file_data
 from data_processing_common import compute_operations, execute_operations
 from text_data_processing import process_text_files
 from output_filter import filter_specific_output
 from nexa.gguf import NexaTextInference
 from content_classifier import classify_filenames_bulk, extract_examples_from_log, remove_duplicate_examples
-from fileremover import isolate_all as process_delete_candidates #✅ fileromover.py 임포트하기기
+from fileremover import isolate_all as process_delete_candidates
 
 def normalize_korean_foldername(text):
     return re.sub(r'[\s_]', '', text.strip())
@@ -31,27 +27,6 @@ def ensure_nltk_data():
     nltk.download('stopwords', quiet=True)
     nltk.download('punkt', quiet=True)
     nltk.download('wordnet', quiet=True)
-
-text_inference = None
-
-def initialize_models():
-    global text_inference
-    if text_inference is None:
-        with filter_specific_output():
-            text_inference = NexaTextInference(
-                model_path=None,
-                local_path=r"C:\\models\\ggml-model-Q4_K_M.gguf",
-                stop_words=[],
-                temperature=0.0,
-                max_new_tokens=256,
-                top_k=3,
-                top_p=0.3,
-                profiling=False
-            )
-        print("\u2705 텍스트 모델 로컬 로드 완료!")
-        print("**----------------------------------------------**")
-        print("**       Text inference model initialized       **")
-        print("**----------------------------------------------**")
 
 def simulate_directory_tree(operations, base_path):
     tree = {}
@@ -80,34 +55,53 @@ def get_quarter_path(file_path):
     quarter = (dt.month - 1) // 3 + 1
     return os.path.join(year, f"{quarter}분기")
 
-def main():
+text_inference = None
+
+def initialize_models():
+    global text_inference
+    if text_inference is None:
+        with filter_specific_output():
+            text_inference = NexaTextInference(
+                model_path=None,
+                local_path=r"C:\\models\\ggml-model-Q4_K_M.gguf",
+                stop_words=[],
+                temperature=0.0,
+                max_new_tokens=256,
+                top_k=3,
+                top_p=0.3,
+                profiling=False
+            )
+        print("\u2705 텍스트 모델 로컬 로드 완료!")
+        print("**----------------------------------------------**")
+        print("**       Text inference model initialized       **")
+        print("**----------------------------------------------**")
+
+def main(auto_mode=False):
     ensure_nltk_data()
     print("-" * 50)
     print("**NOTE: Silent mode logs all outputs to a text file instead of displaying them in the terminal.")
     silent_mode = True
     log_file = 'operation_log.txt'
+    print("-" * 50)
 
-    print("-" * 50)
-    input_path = input("Enter the path of the directory you want to organize: ").strip()
-    while not os.path.exists(input_path):
-        print(f"Input path {input_path} does not exist. Please enter a valid path.")
-        input_path = input("Enter the path of the directory you want to organize: ").strip()
-    print("-" * 50)
-    print("Processing delete candidates (duplicate and old versions)...")
-    process_delete_candidates(input_path) #✅ fileromover.py 내의 함수 실행행
-    print("Delete candidate processing completed.")
-    print("-" * 50)
- 
-    output_path = input("Enter the path to store organized files and folders (press Enter to use 'organized_folder' in the input directory): ").strip()
-    if not output_path:
+    if auto_mode:
+        input_path = r"C:\\Users\\qazws\\OneDrive\\바탕 화면\\연습용"
         output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
+        print(f"[Auto Mode] Input path: {input_path}")
+        print(f"[Auto Mode] Output path: {output_path}")
+    else:
+        input_path = input("Enter the path of the directory you want to organize: ").strip()
+        while not os.path.exists(input_path):
+            print(f"Input path {input_path} does not exist. Please enter a valid path.")
+            input_path = input("Enter the path of the directory you want to organize: ").strip()
 
-    
-    start_time = time.time()
-    file_paths = collect_file_paths(input_path)
-    file_paths = collect_file_paths(input_path)
-    end_time = time.time()
+        output_path = input("Enter the path to store organized files and folders (press Enter to use 'organized_folder' in the input directory): ").strip()
+        if not output_path:
+            output_path = os.path.join(os.path.dirname(input_path), 'organized_folder')
 
+    print("-" * 50)
+
+    # ✅ 분류 먼저!
     file_paths = collect_file_paths(input_path)
     initialize_models()
 
@@ -152,24 +146,33 @@ def main():
         preserve_filename=True
     )
 
+    # ✅ 분류 완료 후, 삭제 후보 정리!
+    print("Processing delete candidates (duplicate and old versions)...")
+    process_delete_candidates(input_path)
+    print("Delete candidate processing completed.")
     print("-" * 50)
+
     print("Proposed directory structure:")
     print(os.path.abspath(output_path))
     simulated_tree = simulate_directory_tree(operations, output_path)
     print_simulated_tree(simulated_tree)
     print("-" * 50)
 
-    # 사용자 확인 후 실제 이동
     os.makedirs(output_path, exist_ok=True)
     execute_operations(
         operations,
-        dry_run=False,  # ✅ 실제 이동 수행
+        dry_run=False,
         silent=silent_mode,
         log_file=log_file
     )
+
     print("-" * 50)
     print("The files have been organized successfully.")
     print("-" * 50)
 
 if __name__ == '__main__':
-    main()
+    import sys
+    auto_mode = False
+    if len(sys.argv) > 1 and sys.argv[1] == "auto":
+        auto_mode = True
+    main(auto_mode)
